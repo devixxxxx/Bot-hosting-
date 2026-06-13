@@ -2,7 +2,7 @@
 ╔══════════════════════════════════════════════════════════════╗
 ║          DARKNOVA AI BOT - PRODUCTION READY v2.0            ║
 ║          Built by Bikash Bindhani                           ║
-║          Dual Bot System: Admin + User                      ║
+║                                                             ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
