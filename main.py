@@ -1,8 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║          DARKNOVA AI BOT - PRODUCTION READY v2.0            ║
-║          Built by Bikash Bindhani                           ║
-║                                                             ║
+║          Built by @MrNewton_2                           ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -13,6 +12,7 @@ import time
 import asyncio
 import logging
 import aiohttp
+import aiohttp.web
 from datetime import datetime, timedelta
 from functools import wraps
 from logging.handlers import RotatingFileHandler
@@ -64,7 +64,7 @@ PERSONAS: dict[str, str] = {
         "You are helpful, direct, and confident. You answer everything clearly. "
         "When writing code, always use ``` blocks with the language name. "
         "Never be rude unnecessarily, but always be real and honest. "
-        "Created by Bikash Bindhani."
+        "Created by @MrNewton_2."
     ),
     "teacher": (
         "You are DarkNova in Teacher mode. You explain concepts step by step, "
@@ -995,20 +995,51 @@ async def admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ── SYSTEM PROMPT PANEL ───────────────────
     elif data == "a_sysprompt":
-        prompt = bot_data.get("cfg", {}).get("system_prompt", "")[:500]
+        cfg = bot_data.get("cfg", {})
+        prompt = cfg.get("system_prompt", "")
+        persona = cfg.get("personality", "default")
+        prev = prompt[:300] + ("..." if len(prompt) > 300 else "")
         text = (
             "⚙️ **SYSTEM PROMPT MANAGER**\n━━━━━━━━━━━━━━━━━━━\n\n"
-            f"**Current (preview):**\n`{prompt}...`\n\n"
-            "Options below:"
+            f"🎭 Active Persona: `{persona}`\n"
+            f"📏 Prompt Length: `{len(prompt)} chars`\n\n"
+            f"📝 **Preview:**\n`{prev}`\n\n"
+            "Choose an action:"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👁 View Full", callback_data="ai_viewprompt"),
-             InlineKeyboardButton("✏️ Edit Prompt", callback_data="ai_setprompt")],
-            [InlineKeyboardButton("🔄 Reset to Default", callback_data="ai_reset")],
+            [InlineKeyboardButton("👁 View Full Prompt", callback_data="ai_viewprompt")],
+            [InlineKeyboardButton("✏️ Edit/Set New Prompt", callback_data="ai_setprompt")],
             [InlineKeyboardButton("🎭 Personality Presets", callback_data="ai_pers")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="a_main")],
+            [InlineKeyboardButton("🔄 Reset to Default", callback_data="ai_reset")],
+            [InlineKeyboardButton("💬 Set Welcome Msg", callback_data="a_setwelcome"),
+             InlineKeyboardButton("🔧 Set Maint Msg", callback_data="a_setmaintmsg")],
+            [InlineKeyboardButton("⬅️ Back to Main", callback_data="a_main")],
         ])
         await q.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+
+    elif data == "a_setwelcome":
+        ctx.user_data["awaiting"] = "set_welcome"
+        current = bot_data.get("welcome", "")[:200]
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_sysprompt")]])
+        await q.edit_message_text(
+            f"💬 **Set Welcome Message**\n\nVariables you can use:\n"
+            "`{name}` — User name\n`{plan}` — Plan type\n"
+            "`{daily}` — Messages used today\n`{limit}` — Daily limit\n\n"
+            f"**Current:**\n`{current}`\n\n"
+            "Send the new welcome message now:",
+            reply_markup=kb, parse_mode=ParseMode.MARKDOWN
+        )
+
+    elif data == "a_setmaintmsg":
+        ctx.user_data["awaiting"] = "set_maint_msg"
+        current = bot_data.get("maintenance_msg", "")[:200]
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="a_sysprompt")]])
+        await q.edit_message_text(
+            f"🔧 **Set Maintenance Message**\n\n"
+            f"**Current:**\n`{current}`\n\n"
+            "Send the new maintenance message:",
+            reply_markup=kb, parse_mode=ParseMode.MARKDOWN
+        )
 
     # ── PERSONALITIES PANEL ───────────────────
     elif data == "a_pers":
@@ -1386,19 +1417,43 @@ async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def cmd_admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handle awaiting states like set_prompt"""
+    """Handle awaiting states from admin panel"""
     awaiting = ctx.user_data.get("awaiting")
+    text = update.message.text.strip()
+
     if awaiting == "set_prompt":
-        new_prompt = update.message.text
-        bot_data["cfg"]["system_prompt"] = new_prompt
+        bot_data["cfg"]["system_prompt"] = text
+        bot_data["cfg"]["personality"] = "custom"
         ctx.user_data.pop("awaiting", None)
-        await update.message.reply_text(
-            f"✅ System prompt updated!\n\nPreview: `{new_prompt[:300]}`",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=get_admin_main_menu()
+        await save_data()
+        reply = (
+            "✅ *System Prompt Updated!*\n\n"
+            f"📝 *Preview:*\n```\n{text[:400]}\n```\n\n"
+            f"📏 Length: {len(text)} chars\n"
+            "🤖 AI will use this for all users."
         )
+        await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_main_menu())
+
+    elif awaiting == "set_maint_msg":
+        bot_data["maintenance_msg"] = text
+        ctx.user_data.pop("awaiting", None)
+        await save_data()
+        await update.message.reply_text(
+            f"✅ Maintenance message updated!\n`{text[:200]}`",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_main_menu()
+        )
+
+    elif awaiting == "set_welcome":
+        bot_data["welcome"] = text
+        ctx.user_data.pop("awaiting", None)
+        await save_data()
+        await update.message.reply_text(
+            f"✅ Welcome message updated!\n`{text[:200]}`",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_main_menu()
+        )
+
     else:
-        await update.message.reply_text("Use /start to open the admin panel.")
+        await update.message.reply_text("🏠 Use /start to open the admin panel.", reply_markup=get_admin_main_menu())
 
 # ══════════════════════════════════════════════
 # USER BOT HANDLERS
@@ -1479,7 +1534,7 @@ async def user_about(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🧠 Model: `{cfg.get('model', 'llama-3.1-8b-instant')}`\n"
         f"🎭 Persona: `{cfg.get('personality', 'default')}`\n"
         f"💎 Features: Memory, Code, Multilingual\n\n"
-        "👨‍💻 Created by: **Bikash Bindhani**\n"
+        "👨‍💻 Created by: **@MrNewton_2**\n"
         "🔥 Powered by: Groq AI + Python"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
@@ -1751,7 +1806,8 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 # AIOHTTP WEB SERVER (for Render health check)
 # ══════════════════════════════════════════════
 async def health_check(request):
-    return aiohttp.web.Response(
+    from aiohttp.web import Response
+    return Response(
         text=json.dumps({
             "status": "ok",
             "uptime": uptime_str(),
@@ -1763,11 +1819,12 @@ async def health_check(request):
 
 
 async def start_web_server():
-    app = aiohttp.web.Application()
-    app.router.add_get("/", health_check)
-    runner = aiohttp.web.AppRunner(app)
+    from aiohttp.web import Application as WebApp, AppRunner, TCPSite
+    web_app = WebApp()
+    web_app.router.add_get("/", health_check)
+    runner = AppRunner(web_app)
     await runner.setup()
-    site = aiohttp.web.TCPSite(runner, "0.0.0.0", PORT)
+    site = TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     logger.info(f"Web server started on port {PORT}")
 
