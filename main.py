@@ -1898,10 +1898,25 @@ async def main():
 
     await admin_app.initialize()
     await user_app.initialize()
+
+    # ── Delete any existing webhooks to avoid Conflict error ──
+    logger.info("Deleting old webhooks...")
+    await admin_app.bot.delete_webhook(drop_pending_updates=True)
+    await user_app.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhooks cleared.")
+
     await admin_app.start()
     await user_app.start()
-    await admin_app.updater.start_polling(drop_pending_updates=True)
-    await user_app.updater.start_polling(drop_pending_updates=True)
+
+    # drop_pending_updates=True clears old webhook/polling conflicts
+    await admin_app.updater.start_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
+    await user_app.updater.start_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
     logger.info("✅ Both bots running!")
 
@@ -1911,7 +1926,10 @@ async def main():
         logger.info("Shutting down...")
     finally:
         await save_data()
-        await user_bot_instance.close()
+        try:
+            await user_bot_instance.close()
+        except Exception:
+            pass
         await admin_app.updater.stop()
         await user_app.updater.stop()
         await admin_app.stop()
