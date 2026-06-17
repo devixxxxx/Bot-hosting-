@@ -1525,18 +1525,22 @@ async def usr_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/start — Welcome\n/help — This list\n/reset — Clear memory (Premium)\n"
         "/about — About\n/plan — Your plan\n/redeem <code> — Premium\n"
         "/contact — Admin\n/ping — Latency\n/speed — AI speed\n"
-        "/model — Model info\n/agent <query> — Force Agent mode\n\n"
+        "/model — AI info\n/agent <query> — Agent mode\n\n"
         "Just type to chat!\n"
         "Auto-agent on: search, weather, calculate, news, find..."
     )
 
 async def usr_about(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    cfg = bot_data.get("cfg",{})
     await update.message.reply_text(
-        "DarkNova AI Bot\n---\n"
-        f"Persona: {cfg.get('personality','default')}\n"
-        f"Agent: {'ON' if cfg.get('agent_enabled',True) else 'OFF'}\n"
-        "Features: Memory, Code/ZIP, Agentic AI, Multilingual\n\n"
+        "DarkNova AI Bot\n"
+        "---\n"
+        "A powerful AI assistant.\n\n"
+        "Features:\n"
+        "- Smart conversations\n"
+        "- Code & project generation\n"
+        "- Real-time web search\n"
+        "- Weather, calculator, and more\n"
+        "- Memory for Premium users\n\n"
         "Built by @MrNewton_2"
     )
 
@@ -1574,23 +1578,22 @@ async def usr_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def usr_speed(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if is_banned(uid): return
-    m=await update.message.reply_text("Testing...")
-    t=time.time(); r=await call_ai(uid,"Say: Speed OK")
-    await m.edit_text(f"AI speed: {round(time.time()-t,2)}s\n{r}")
+    m   = await update.message.reply_text("Testing AI speed...")
+    t   = time.time()
+    await call_ai(uid, "Say: Speed OK")
+    elapsed = round(time.time()-t, 2)
+    await m.edit_text(f"Response time: {elapsed}s")
 
 async def usr_model(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    cfg=bot_data.get("cfg",{})
-    prov=cfg.get("provider","groq").upper()
-    agt="ON" if cfg.get("agent_enabled",True) else "OFF"
-    temp=cfg.get("temperature",0.9)
-    maxt=cfg.get("max_tokens",4096)
-    persona=cfg.get("personality","default")
+    cfg     = bot_data.get("cfg",{})
+    persona = cfg.get("personality","default")
+    agt     = "ON" if cfg.get("agent_enabled",True) else "OFF"
     await update.message.reply_text(
-        "AI Info\n---\n"
-        f"Provider: {prov}\n"
-        f"Temp: {temp} | Tokens: {maxt}\n"
+        "DarkNova AI Info\n"
+        "---\n"
         f"Persona: {persona}\n"
-        f"Agent: {agt}"
+        f"Smart Agent: {agt}\n"
+        "Powered by DarkNova AI Engine"
     )
 
 async def usr_agent_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1852,24 +1855,14 @@ async def main():
     await admin_app.start()
     await user_app.start()
 
-    # Polling with conflict protection
+    # Polling — only supported args in PTB 21.x
     await admin_app.updater.start_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
-        timeout=30,
-        read_timeout=30,
-        write_timeout=30,
-        connect_timeout=30,
-        pool_timeout=30,
     )
     await user_app.updater.start_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
-        timeout=30,
-        read_timeout=30,
-        write_timeout=30,
-        connect_timeout=30,
-        pool_timeout=30,
     )
 
     logger.info("DarkNova v6.0 — Both bots running!")
