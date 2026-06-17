@@ -41,6 +41,7 @@ USER_BOT_TOKEN  = os.environ.get("USER_BOT_TOKEN",  "")
 ADMIN_ID        = int(os.environ.get("ADMIN_ID", "0"))
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY", "")
 HF_TOKEN        = os.environ.get("HF_TOKEN", "")
+ZEN_API_KEY     = os.environ.get("OPENCODE_ZEN_API_KEY", "")
 PORT            = int(os.environ.get("PORT", "8080"))
 
 DATA_FILE    = "bot_data.json"
@@ -71,6 +72,14 @@ HF_MODELS = {
         "id":    "mistralai/Mistral-7B-Instruct-v0.3:featherless-ai",
         "label": "🌪 Mistral 7B (HF)",
     },
+}
+
+ZEN_MODELS = {
+    "big_pickle":  {"id": "big-pickle",            "label": "🥒 Big Pickle (Free)"},
+    "deepseek_v4": {"id": "deepseek-v4-flash-free","label": "🔬 DeepSeek V4 Flash (Free)"},
+    "mimo":        {"id": "mimo-v2.5-free",         "label": "⚡ MiMo V2.5 (Free)"},
+    "north_mini":  {"id": "north-mini-code-free",   "label": "🧭 North Mini Code (Free)"},
+    "nemotron":    {"id": "nemotron-3-ultra-free",  "label": "🚀 Nemotron 3 Ultra (Free)"},
 }
 
 # ══════════════════════════════════════════════
@@ -124,10 +133,12 @@ def _default():
     return {
         "users": {}, "banned": [], "convos": {}, "maint": False, "force_sub": None,
         "cfg": {
-            "provider":        "groq",        # "groq" or "huggingface"
+            "provider":        "groq",        # "groq", "huggingface", or "zen"
             "groq_model_key":  "lightning",
             "hf_model_key":    "gemma_abliterated",
+            "zen_model_key":   "deepseek_v4",
             "custom_model_id": "",            # override any model
+            "auto_fallback":   True,          # try next provider on error
             "temperature":     0.9,
             "max_tokens":      4096,
             "personality":     "default",
@@ -139,7 +150,9 @@ def _default():
             "total_messages": 0, "today_messages": 0,
             "total_broadcasts": 0, "total_bans": 0, "total_mutes": 0,
             "total_tokens": 0, "groq_calls": 0, "groq_errors": 0,
-            "hf_calls": 0, "hf_errors": 0, "agent_calls": 0,
+            "hf_calls": 0, "hf_errors": 0,
+            "zen_calls": 0, "zen_errors": 0,
+            "agent_calls": 0, "fallback_used": 0,
             "last_reset": datetime.now().strftime("%Y-%m-%d"),
         },
         "premium": {}, "codes": {}, "muted": {}, "flood": {},
@@ -208,9 +221,12 @@ def get_model_id() -> str:
     if provider == "groq":
         key = cfg.get("groq_model_key", "lightning")
         return GROQ_MODELS.get(key, GROQ_MODELS["lightning"])["id"]
-    else:
+    elif provider == "huggingface":
         key = cfg.get("hf_model_key", "gemma_abliterated")
         return HF_MODELS.get(key, HF_MODELS["gemma_abliterated"])["id"]
+    else:
+        key = cfg.get("zen_model_key", "deepseek_v4")
+        return ZEN_MODELS.get(key, ZEN_MODELS["deepseek_v4"])["id"]
 
 def get_model_label() -> str:
     cfg = bot_data.get("cfg", {})
@@ -220,9 +236,12 @@ def get_model_label() -> str:
     if provider == "groq":
         key = cfg.get("groq_model_key", "lightning")
         return GROQ_MODELS.get(key, GROQ_MODELS["lightning"])["label"]
-    else:
+    elif provider == "huggingface":
         key = cfg.get("hf_model_key", "gemma_abliterated")
         return HF_MODELS.get(key, HF_MODELS["gemma_abliterated"])["label"]
+    else:
+        key = cfg.get("zen_model_key", "deepseek_v4")
+        return ZEN_MODELS.get(key, ZEN_MODELS["deepseek_v4"])["label"]
 
 def get_api_url_and_headers() -> tuple:
     cfg      = bot_data.get("cfg", {})
@@ -231,11 +250,38 @@ def get_api_url_and_headers() -> tuple:
         url     = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
         stats   = ("groq_calls", "groq_errors")
-    else:
+    elif provider == "huggingface":
         url     = "https://router.huggingface.co/v1/chat/completions"
         headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
         stats   = ("hf_calls", "hf_errors")
+    else:
+        url     = "https://opencode.ai/zen/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {ZEN_API_KEY}", "Content-Type": "application/json"}
+        stats   = ("zen_calls", "zen_errors")
     return url, headers, stats
+
+def get_fallback_url_and_headers(failed_provider: str) -> tuple:
+    """Returns next provider to try when one fails — for auto-fallback."""
+    order = ["groq", "huggingface", "zen"]
+    available = []
+    if GROQ_API_KEY: available.append("groq")
+    if HF_TOKEN:      available.append("huggingface")
+    if ZEN_API_KEY:   available.append("zen")
+    for p in order:
+        if p in available and p != failed_provider:
+            if p == "groq":
+                return "groq", "https://api.groq.com/openai/v1/chat/completions", \
+                    {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}, \
+                    ("groq_calls","groq_errors")
+            elif p == "huggingface":
+                return "huggingface", "https://router.huggingface.co/v1/chat/completions", \
+                    {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}, \
+                    ("hf_calls","hf_errors")
+            else:
+                return "zen", "https://opencode.ai/zen/v1/chat/completions", \
+                    {"Authorization": f"Bearer {ZEN_API_KEY}", "Content-Type": "application/json"}, \
+                    ("zen_calls","zen_errors")
+    return None, None, None, None
 
 # ══════════════════════════════════════════════
 # USER HELPERS
@@ -505,24 +551,19 @@ def wants_agent(text: str) -> bool:
     t = text.lower()
     return any(kw in t for kw in AGENT_TRIGGERS)
 
-async def call_ai(uid: int, user_msg: str, force_agent: bool = False) -> str:
+async def _call_ai_once(uid: int, user_msg: str, provider: str, model: str,
+                         url: str, headers: dict, stat_ok: str, stat_err: str,
+                         use_agent: bool) -> tuple:
     """
-    Main AI call — uses agentic loop if agent_enabled or force_agent.
-    Supports both Groq and HuggingFace with tool_calls.
+    Single attempt against one provider. Returns (success, reply_or_error).
     """
-    cfg    = bot_data.get("cfg", {})
+    cfg  = bot_data.get("cfg", {})
     prompt = cfg.get("system_prompt") or PERSONAS["default"]
-    model  = get_model_id()
-    temp   = float(cfg.get("temperature", 0.9))
-    maxt   = int(cfg.get("max_tokens", 4096))
-    url, headers, (stat_ok, stat_err) = get_api_url_and_headers()
+    temp = float(cfg.get("temperature", 0.9))
+    maxt = int(cfg.get("max_tokens", 4096))
 
-    use_agent = force_agent or (cfg.get("agent_enabled", True) and wants_agent(user_msg))
-
-    # Build messages
     msgs = [{"role": "system", "content": cfg.get("agent_prompt", DEFAULT_AGENT_PROMPT) if use_agent else prompt}]
 
-    # Add premium history
     if is_premium(uid):
         hist = bot_data.get("convos", {}).get(str(uid), [])
         cut  = (datetime.now() - timedelta(hours=48)).isoformat()
@@ -555,28 +596,26 @@ async def call_ai(uid: int, user_msg: str, force_agent: bool = False) -> str:
                                   timeout=aiohttp.ClientTimeout(total=30)) as r:
                     if r.status != 200:
                         err = await r.text()
-                        logger.error(f"AI {r.status}: {err[:200]}")
+                        logger.error(f"{provider} {r.status}: {err[:200]}")
                         bot_data["stats"][stat_err] = bot_data["stats"].get(stat_err, 0) + 1
-                        return f"AI error ({r.status}). Try again."
+                        return False, f"status_{r.status}"
                     data = await r.json()
         except asyncio.TimeoutError:
             bot_data["stats"][stat_err] = bot_data["stats"].get(stat_err, 0) + 1
-            return "Timeout. Try again."
+            return False, "timeout"
         except Exception as e:
             bot_data["stats"][stat_err] = bot_data["stats"].get(stat_err, 0) + 1
-            logger.error(f"AI call: {e}")
-            return f"Error: {str(e)[:80]}"
+            logger.error(f"{provider} call: {e}")
+            return False, str(e)[:80]
 
         choice  = data["choices"][0]
         msg_obj = choice["message"]
         tokens  = data.get("usage", {}).get("total_tokens", 0)
         bot_data["stats"]["total_tokens"] = bot_data["stats"].get("total_tokens", 0) + tokens
 
-        # No tool calls — final answer
         if not msg_obj.get("tool_calls"):
             reply = msg_obj.get("content","").strip()
 
-            # Save to premium memory
             if is_premium(uid):
                 k = str(uid); c = bot_data.setdefault("convos", {})
                 c.setdefault(k, []); ts = datetime.now().isoformat()
@@ -584,33 +623,67 @@ async def call_ai(uid: int, user_msg: str, force_agent: bool = False) -> str:
                          {"role":"assistant","content":reply,"ts":ts}]
                 c[k] = c[k][-40:]
 
-            # Save chat log
             k = str(uid); ch = bot_data.setdefault("chats", {})
             ch.setdefault(k, [])
             ch[k].append({"ts":datetime.now().isoformat(),"user":user_msg[:500],"ai":reply[:500]})
             ch[k] = ch[k][-200:]
 
             if tools_used and use_agent:
-                tool_log = "\n".join(f"  🔧 {t}" for t in tools_used)
-                reply    = f"🤖 Tools used:\n{tool_log}\n\n━━━━━━━━━━\n{reply}"
+                tool_log = "\n".join(f"  - {t}" for t in tools_used)
+                reply    = f"Tools used:\n{tool_log}\n\n---\n{reply}"
 
-            return reply or "Done."
+            return True, (reply or "Done.")
 
-        # Execute tool calls
         msgs.append({"role":"assistant","content":msg_obj.get("content") or "","tool_calls":msg_obj["tool_calls"]})
         for tc in msg_obj["tool_calls"]:
             tname = tc["function"]["name"]
             try:   targs = json.loads(tc["function"]["arguments"])
-            except: targs = {}
+            except Exception: targs = {}
             first = list(targs.values())[0][:40] if targs else ""
             tools_used.append(f"{tname}({first})")
             logger.info(f"Agent: {tname} {targs}")
             result = await exec_tool(tname, targs)
             msgs.append({"role":"tool","tool_call_id":tc["id"],"name":tname,"content":result})
 
-    return "Agent reached max steps. Try a simpler query."
+    return True, "Agent reached max steps. Try a simpler query."
 
-# ══════════════════════════════════════════════
+
+async def call_ai(uid: int, user_msg: str, force_agent: bool = False) -> str:
+    """
+    Main AI entry point — agentic for Groq, HuggingFace, and OpenCode Zen.
+    Auto-fallback: if active provider fails, tries the next configured provider.
+    """
+    cfg       = bot_data.get("cfg", {})
+    use_agent = force_agent or (cfg.get("agent_enabled", True) and wants_agent(user_msg))
+
+    provider = cfg.get("provider", "groq")
+    model    = get_model_id()
+    url, headers, (stat_ok, stat_err) = get_api_url_and_headers()
+
+    ok, result = await _call_ai_once(uid, user_msg, provider, model, url, headers, stat_ok, stat_err, use_agent)
+    if ok:
+        return result
+
+    # ── Auto-fallback to next available provider ──
+    if cfg.get("auto_fallback", True):
+        fb_provider, fb_url, fb_headers, fb_stats = get_fallback_url_and_headers(provider)
+        if fb_provider:
+            logger.info(f"Falling back from {provider} to {fb_provider}")
+            bot_data["stats"]["fallback_used"] = bot_data["stats"].get("fallback_used", 0) + 1
+            if fb_provider == "groq":
+                fb_model = GROQ_MODELS.get(cfg.get("groq_model_key","lightning"), GROQ_MODELS["lightning"])["id"]
+            elif fb_provider == "huggingface":
+                fb_model = HF_MODELS.get(cfg.get("hf_model_key","gemma_abliterated"), HF_MODELS["gemma_abliterated"])["id"]
+            else:
+                fb_model = ZEN_MODELS.get(cfg.get("zen_model_key","deepseek_v4"), ZEN_MODELS["deepseek_v4"])["id"]
+
+            ok2, result2 = await _call_ai_once(uid, user_msg, fb_provider, fb_model, fb_url, fb_headers,
+                                                fb_stats[0], fb_stats[1], use_agent)
+            if ok2:
+                return result2
+
+    return "AI service is temporarily unavailable. Please try again in a moment."
+
 # FORCE SUBSCRIBE
 # ══════════════════════════════════════════════
 async def check_fsub(uid: int, bot: Bot) -> bool:
@@ -723,7 +796,9 @@ def models_menu() -> InlineKeyboardMarkup:
     prov = cfg.get("provider", "groq")
     gkey = cfg.get("groq_model_key", "lightning")
     hkey = cfg.get("hf_model_key", "gemma_abliterated")
+    zkey = cfg.get("zen_model_key", "deepseek_v4")
     cust = cfg.get("custom_model_id", "")
+    fb   = cfg.get("auto_fallback", True)
     btns = [
         [InlineKeyboardButton(
             f"{'✅ ' if prov=='groq' else ''}⚡ Groq",
@@ -732,6 +807,14 @@ def models_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton(
             f"{'✅ ' if prov=='huggingface' else ''}🤗 HuggingFace",
             callback_data="prov_hf"
+        ),
+         InlineKeyboardButton(
+            f"{'✅ ' if prov=='zen' else ''}🌐 OpenCode Zen",
+            callback_data="prov_zen"
+        )],
+        [InlineKeyboardButton(
+            f"{'🟢' if fb else '🔴'} Auto-Fallback: {'ON' if fb else 'OFF'}",
+            callback_data="toggle_fallback"
         )],
     ]
     btns.append([InlineKeyboardButton("── GROQ MODELS ──", callback_data="noop")])
@@ -744,6 +827,11 @@ def models_menu() -> InlineKeyboardMarkup:
         active = prov == "huggingface" and hkey == k and not cust
         lbl = f"✅ {v['label']}" if active else v["label"]
         btns.append([InlineKeyboardButton(lbl, callback_data=f"hfm_{k}")])
+    btns.append([InlineKeyboardButton("── OPENCODE ZEN MODELS (FREE) ──", callback_data="noop")])
+    for k, v in ZEN_MODELS.items():
+        active = prov == "zen" and zkey == k and not cust
+        lbl = f"✅ {v['label']}" if active else v["label"]
+        btns.append([InlineKeyboardButton(lbl, callback_data=f"zm_{k}")])
     btns.append([InlineKeyboardButton("🔑 Set Custom Model ID", callback_data="set_custom_model")])
     if cust:
         btns.append([InlineKeyboardButton(f"🗑 Clear Custom: {cust[:25]}", callback_data="clr_custom_model")])
@@ -842,6 +930,8 @@ async def adm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Antiflood: {'ON' if bot_data.get('antiflood',{}).get('on') else 'OFF'}\n\n"
             f"Groq: {s.get('groq_calls',0)} calls, {s.get('groq_errors',0)} errs\n"
             f"HF: {s.get('hf_calls',0)} calls, {s.get('hf_errors',0)} errs\n"
+            f"Zen: {s.get('zen_calls',0)} calls, {s.get('zen_errors',0)} errs\n"
+            f"Fallback used: {s.get('fallback_used',0)} times\n"
             f"Uptime: {uptime()}",
             reply_markup=BACK
         ); return
@@ -858,6 +948,8 @@ async def adm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Agent calls: {s.get('agent_calls',0)}\n\n"
             f"Groq: {s.get('groq_calls',0)} calls | {s.get('groq_errors',0)} errors\n"
             f"HF: {s.get('hf_calls',0)} calls | {s.get('hf_errors',0)} errors\n"
+            f"Zen: {s.get('zen_calls',0)} calls | {s.get('zen_errors',0)} errors\n"
+            f"Fallback triggered: {s.get('fallback_used',0)} times\n"
             f"Uptime: {uptime()}",
             reply_markup=BACK
         ); return
@@ -958,7 +1050,8 @@ async def adm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Active Model: {get_model_label()}\n"
             f"Custom ID: {cust}\n\n"
             "Groq: requires GROQ_API_KEY\n"
-            "HuggingFace: requires HF_TOKEN\n\n"
+            "HuggingFace: requires HF_TOKEN\n"
+            "OpenCode Zen: requires OPENCODE_ZEN_API_KEY (free models!)\n\n"
             "Select provider and model below:",
             reply_markup=models_menu()
         ); return
@@ -995,12 +1088,37 @@ async def adm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await save_data(); await q.answer(f"HF: {HF_MODELS[k]['label']}", show_alert=True)
             await q.edit_message_text("MODEL SWITCH", reply_markup=models_menu()); return
 
+    if d == "prov_zen":
+        if not ZEN_API_KEY:
+            await q.answer("OPENCODE_ZEN_API_KEY not set!", show_alert=True); return
+        bot_data["cfg"]["provider"] = "zen"
+        await save_data(); await q.answer("Switched to OpenCode Zen!", show_alert=True)
+        await q.edit_message_text("MODEL SWITCH", reply_markup=models_menu()); return
+
+    if d.startswith("zm_"):
+        k = d[3:]
+        if k in ZEN_MODELS:
+            bot_data["cfg"]["provider"]        = "zen"
+            bot_data["cfg"]["zen_model_key"]   = k
+            bot_data["cfg"]["custom_model_id"] = ""
+            await save_data(); await q.answer(f"Zen: {ZEN_MODELS[k]['label']}", show_alert=True)
+            await q.edit_message_text("MODEL SWITCH", reply_markup=models_menu()); return
+
+    if d == "toggle_fallback":
+        cur = bot_data["cfg"].get("auto_fallback", True)
+        bot_data["cfg"]["auto_fallback"] = not cur
+        await save_data()
+        s = "ENABLED" if not cur else "DISABLED"
+        await q.answer(f"Auto-Fallback {s}!", show_alert=True)
+        await q.edit_message_text("MODEL SWITCH", reply_markup=models_menu()); return
+
     if d == "set_custom_model":
         ctx.user_data["await"] = "set_custom_model"
         await q.edit_message_text(
             "Send the custom model ID.\n\n"
             "Groq example: llama-3.1-8b-instant\n"
-            "HF example: IlyaGusev/gemma-2-2b-it-abliterated:featherless-ai\n\n"
+            "HF example: IlyaGusev/gemma-2-2b-it-abliterated:featherless-ai\n"
+            "Zen example: deepseek-v4-flash-free\n\n"
             "The current provider's API key will be used.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel",callback_data="a_models")]])
         ); return
@@ -1240,7 +1358,7 @@ async def adm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"DAILY REPORT — {today}\n---\n"
             f"Messages: {s.get('today_messages',0)} | New Users: {new}\n"
             f"Tokens: {s.get('total_tokens',0)} | Agent: {s.get('agent_calls',0)}\n"
-            f"Groq: {s.get('groq_calls',0)} calls | HF: {s.get('hf_calls',0)} calls\n"
+            f"Groq: {s.get('groq_calls',0)} | HF: {s.get('hf_calls',0)} | Zen: {s.get('zen_calls',0)} calls\n"
             f"Errors: Groq {s.get('groq_errors',0)} | HF {s.get('hf_errors',0)}\n"
             f"Uptime: {uptime()}",
             reply_markup=BACK
@@ -1819,8 +1937,8 @@ async def main():
     global user_bot_obj
     if not all([ADMIN_BOT_TOKEN, USER_BOT_TOKEN]):
         logger.error("Missing ADMIN_BOT_TOKEN or USER_BOT_TOKEN!"); return
-    if not GROQ_API_KEY and not HF_TOKEN:
-        logger.error("Need at least one: GROQ_API_KEY or HF_TOKEN!"); return
+    if not GROQ_API_KEY and not HF_TOKEN and not ZEN_API_KEY:
+        logger.error("Need at least one: GROQ_API_KEY, HF_TOKEN, or OPENCODE_ZEN_API_KEY!"); return
 
     load_data()
     bot_data["start_time"] = datetime.now().isoformat()
@@ -1830,6 +1948,7 @@ async def main():
 
     if GROQ_API_KEY: logger.info("Groq: configured")
     if HF_TOKEN:     logger.info("HuggingFace: configured")
+    if ZEN_API_KEY:  logger.info("OpenCode Zen: configured")
     logger.info(f"Provider: {bot_data['cfg'].get('provider','groq').upper()}")
     logger.info("Starting DarkNova v6.0...")
 
