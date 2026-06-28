@@ -289,6 +289,11 @@ def get_api_url_and_headers() -> tuple:
 
 def get_fallback_url_and_headers(failed_provider: str) -> tuple:
     """Returns next provider to try when one fails — for auto-fallback."""
+    return get_fallback_url_and_headers_excluding({failed_provider})
+
+
+def get_fallback_url_and_headers_excluding(tried: set) -> tuple:
+    """Returns the next untried, configured provider — walks the whole chain."""
     order = ["groq", "huggingface", "openrouter", "zen"]
     available = []
     if GROQ_API_KEY: available.append("groq")
@@ -296,7 +301,7 @@ def get_fallback_url_and_headers(failed_provider: str) -> tuple:
     if OR_API_KEY:    available.append("openrouter")
     if ZEN_API_KEY:   available.append("zen")
     for p in order:
-        if p in available and p != failed_provider:
+        if p in available and p not in tried:
             if p == "groq":
                 return "groq", "https://api.groq.com/openai/v1/chat/completions", \
                     {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}, \
@@ -713,8 +718,9 @@ async def _call_ai_once(uid: int, user_msg: str, provider: str, model: str,
 
 async def call_ai(uid: int, user_msg: str, force_agent: bool = False) -> str:
     """
-    Main AI entry point — agentic for Groq, HuggingFace, and OpenCode Zen.
-    Auto-fallback: if active provider fails, tries the next configured provider.
+    Main AI entry point — agentic for Groq, HuggingFace, OpenRouter, OpenCode Zen.
+    Auto-fallback: tries every configured provider in order until one succeeds,
+    with a short retry on the primary provider first (handles transient rate limits).
     """
     cfg       = bot_data.get("cfg", {})
     use_agent = force_agent or (cfg.get("agent_enabled", True) and wants_agent(user_msg))
@@ -723,30 +729,48 @@ async def call_ai(uid: int, user_msg: str, force_agent: bool = False) -> str:
     model    = get_model_id()
     url, headers, (stat_ok, stat_err) = get_api_url_and_headers()
 
+    # ── Try primary provider, with one quick retry on transient failure ──
     ok, result = await _call_ai_once(uid, user_msg, provider, model, url, headers, stat_ok, stat_err, use_agent)
     if ok:
         return result
 
-    # ── Auto-fallback to next available provider ──
-    if cfg.get("auto_fallback", True):
-        fb_provider, fb_url, fb_headers, fb_stats = get_fallback_url_and_headers(provider)
-        if fb_provider:
-            logger.info(f"Falling back from {provider} to {fb_provider}")
-            bot_data["stats"]["fallback_used"] = bot_data["stats"].get("fallback_used", 0) + 1
-            if fb_provider == "groq":
-                fb_model = GROQ_MODELS.get(cfg.get("groq_model_key","lightning"), GROQ_MODELS["lightning"])["id"]
-            elif fb_provider == "huggingface":
-                fb_model = HF_MODELS.get(cfg.get("hf_model_key","gemma_abliterated"), HF_MODELS["gemma_abliterated"])["id"]
-            elif fb_provider == "openrouter":
-                fb_model = OR_MODELS.get(cfg.get("or_model_key","llama_or"), OR_MODELS["llama_or"])["id"]
-            else:
-                fb_model = ZEN_MODELS.get(cfg.get("zen_model_key","deepseek_v4"), ZEN_MODELS["deepseek_v4"])["id"]
+    if result in ("status_429", "status_503", "timeout"):
+        await asyncio.sleep(1.5)
+        ok, result = await _call_ai_once(uid, user_msg, provider, model, url, headers, stat_ok, stat_err, use_agent)
+        if ok:
+            return result
 
-            ok2, result2 = await _call_ai_once(uid, user_msg, fb_provider, fb_model, fb_url, fb_headers,
-                                                fb_stats[0], fb_stats[1], use_agent)
-            if ok2:
-                return result2
+    if not cfg.get("auto_fallback", True):
+        logger.error(f"All attempts failed on {provider}, fallback disabled. Last error: {result}")
+        return "AI service is temporarily unavailable. Please try again in a moment."
 
+    # ── Walk through every other configured provider until one works ──
+    tried = {provider}
+    last_error = result
+    while True:
+        fb_provider, fb_url, fb_headers, fb_stats = get_fallback_url_and_headers_excluding(tried)
+        if not fb_provider:
+            break
+        tried.add(fb_provider)
+        logger.info(f"Falling back from {provider} to {fb_provider} (last error: {last_error})")
+        bot_data["stats"]["fallback_used"] = bot_data["stats"].get("fallback_used", 0) + 1
+
+        if fb_provider == "groq":
+            fb_model = GROQ_MODELS.get(cfg.get("groq_model_key","lightning"), GROQ_MODELS["lightning"])["id"]
+        elif fb_provider == "huggingface":
+            fb_model = HF_MODELS.get(cfg.get("hf_model_key","gemma_abliterated"), HF_MODELS["gemma_abliterated"])["id"]
+        elif fb_provider == "openrouter":
+            fb_model = OR_MODELS.get(cfg.get("or_model_key","llama_or"), OR_MODELS["llama_or"])["id"]
+        else:
+            fb_model = ZEN_MODELS.get(cfg.get("zen_model_key","deepseek_v4"), ZEN_MODELS["deepseek_v4"])["id"]
+
+        ok2, result2 = await _call_ai_once(uid, user_msg, fb_provider, fb_model, fb_url, fb_headers,
+                                            fb_stats[0], fb_stats[1], use_agent)
+        if ok2:
+            return result2
+        last_error = result2
+
+    logger.error(f"All providers failed. Tried: {tried}. Last error: {last_error}")
     return "AI service is temporarily unavailable. Please try again in a moment."
 
 # FORCE SUBSCRIBE
@@ -833,6 +857,32 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 BACK = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="a_main")]])
+
+def limits_menu() -> InlineKeyboardMarkup:
+    lims   = bot_data.get("limits",{})
+    free_n = lims.get("free", 20)
+    prem_n = lims.get("prem", 99999)
+    prem_lbl = "Unlimited" if prem_n >= 99999 else str(prem_n)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🆓 Free Limit: {free_n}/day", callback_data="limit_free_menu")],
+        [InlineKeyboardButton(f"💎 Premium Limit: {prem_lbl}/day", callback_data="limit_prem_menu")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="a_prem")],
+    ])
+
+def limit_preset_menu(plan: str) -> InlineKeyboardMarkup:
+    cur = bot_data.get("limits",{}).get(plan, 20 if plan == "free" else 99999)
+    presets = [10, 20, 30, 50, 100, 200, 500, 1000] if plan == "free" else [50, 100, 300, 500, 1000, 5000, 99999]
+    btns, row = [], []
+    for n in presets:
+        lbl_n = "Unlimited" if n >= 99999 else str(n)
+        lbl = f"✅ {lbl_n}" if n == cur else lbl_n
+        row.append(InlineKeyboardButton(lbl, callback_data=f"limitset_{plan}_{n}"))
+        if len(row) == 3:
+            btns.append(row); row = []
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("✏️ Set Custom Number", callback_data=f"limit_{plan}_custom")])
+    btns.append([InlineKeyboardButton("⬅️ Back", callback_data="a_limits")])
+    return InlineKeyboardMarkup(btns)
 
 def ai_menu() -> InlineKeyboardMarkup:
     cfg  = bot_data.get("cfg", {})
@@ -1376,8 +1426,63 @@ async def adm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             u = bot_data.get("users",{}).get(uid,{})
             exp = info.get("expiry","?")
             lines.append(f"{uid} | {u.get('name','?')} | {'permanent' if exp=='permanent' else exp[:10]}")
-        lines.append("\n/premium <id> <days> (0=perm)\n/removepremium <id>\n/setlimit free|prem <n>")
-        await q.edit_message_text("\n".join(lines), reply_markup=BACK); return
+        lines.append("\n/premium <id> <days> (0=perm)\n/removepremium <id>")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Set Message Limits", callback_data="a_limits")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="a_main")],
+        ])
+        await q.edit_message_text("\n".join(lines), reply_markup=kb); return
+
+    if d == "a_limits":
+        lims = bot_data.get("limits",{})
+        free_n = lims.get("free", 20)
+        prem_n = lims.get("prem", 99999)
+        prem_lbl = "Unlimited" if prem_n >= 99999 else str(prem_n)
+        await q.edit_message_text(
+            f"MESSAGE LIMITS\n---\n"
+            f"Free users: {free_n} messages/day\n"
+            f"Premium users: {prem_lbl} messages/day\n\n"
+            "Tap a preset below, or set a custom number.",
+            reply_markup=limits_menu()
+        ); return
+
+    if d == "limit_free_menu":
+        await q.edit_message_text("Set FREE user daily limit:", reply_markup=limit_preset_menu("free")); return
+
+    if d == "limit_prem_menu":
+        await q.edit_message_text("Set PREMIUM user daily limit:", reply_markup=limit_preset_menu("prem")); return
+
+    if d.startswith("limitset_"):
+        # format: limitset_<plan>_<value>
+        rest = d[len("limitset_"):]
+        plan, _, val = rest.partition("_")
+        if plan in ("free","prem"):
+            try:
+                n = int(val)
+            except ValueError:
+                n = 99999
+            bot_data["limits"][plan] = n
+            await save_data()
+            lbl = "Unlimited" if n >= 99999 else f"{n}/day"
+            await q.answer(f"{plan.upper()} limit set to {lbl}", show_alert=True)
+            await q.edit_message_text(
+                f"Set {plan.upper()} daily limit:",
+                reply_markup=limit_preset_menu(plan)
+            ); return
+
+    if d == "limit_free_custom":
+        ctx.user_data["await"] = "set_limit_free_custom"
+        await q.edit_message_text(
+            "Send a number for the FREE user daily message limit.\nExample: 35",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel",callback_data="limit_free_menu")]])
+        ); return
+
+    if d == "limit_prem_custom":
+        ctx.user_data["await"] = "set_limit_prem_custom"
+        await q.edit_message_text(
+            "Send a number for the PREMIUM user daily message limit.\nUse 99999 for unlimited.\nExample: 500",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel",callback_data="limit_prem_menu")]])
+        ); return
 
     if d == "a_codes":
         codes = bot_data.get("codes",{}); active = [c for c,v in codes.items() if not v.get("used")]
@@ -1503,6 +1608,19 @@ async def adm_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         bot_data["cfg"]["custom_model_id"] = text.strip()
         ctx.user_data.pop("await",None); await save_data()
         await update.message.reply_text(f"Custom model set: {text.strip()}", reply_markup=main_menu())
+    elif aw in ("set_limit_free_custom", "set_limit_prem_custom"):
+        plan = "free" if aw == "set_limit_free_custom" else "prem"
+        try:
+            n = int(text.strip())
+            if n <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Please send a valid positive number (e.g. 50).")
+            return
+        bot_data["limits"][plan] = n
+        ctx.user_data.pop("await",None); await save_data()
+        lbl = "Unlimited" if n >= 99999 else f"{n}/day"
+        await update.message.reply_text(f"{plan.upper()} daily message limit set to {lbl}", reply_markup=main_menu())
     else:
         ctx.user_data.pop("await",None)
         await update.message.reply_text("Use /start to open admin panel.", reply_markup=main_menu())
